@@ -3,11 +3,13 @@ import "../index.css";
 
 import {
   ORCHESTRATION_WS_METHODS,
+  type ApprovalRequestId,
   type MessageId,
   type OrchestrationReadModel,
   type ProjectId,
   type ServerConfig,
   type ThreadId,
+  type TurnId,
   type WsWelcomePayload,
   WS_CHANNELS,
   WS_METHODS,
@@ -34,6 +36,8 @@ import { estimateTimelineMessageHeight } from "./timelineHeight";
 import { DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts/settings";
 
 const THREAD_ID = "thread-browser-test" as ThreadId;
+const PLAN_TURN_ID = "turn-browser-plan" as TurnId;
+const PLAN_REQUEST_ID = "req-browser-plan-input" as ApprovalRequestId;
 const UUID_ROUTE_RE = /^\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const PROJECT_ID = "project-1" as ProjectId;
 const NOW_ISO = "2026-03-04T12:00:00.000Z";
@@ -432,6 +436,118 @@ function createSnapshotWithLongProposedPlan(): OrchestrationReadModel {
           })
         : thread,
     ),
+  };
+}
+
+function createSnapshotWithPendingPlanQuestion(): OrchestrationReadModel {
+  const snapshot = createSnapshotForTargetUser({
+    targetMessageId: "msg-user-plan-question-target" as MessageId,
+    targetText: "plan question thread",
+  });
+
+  return {
+    ...snapshot,
+    threads: snapshot.threads.map((thread) =>
+      thread.id === THREAD_ID
+        ? Object.assign({}, thread, {
+            interactionMode: "plan",
+            latestTurn: {
+              turnId: PLAN_TURN_ID,
+              state: "completed",
+              requestedAt: isoAt(100),
+              startedAt: isoAt(101),
+              completedAt: isoAt(102),
+              assistantMessageId: null,
+            },
+            activities: [
+              {
+                id: "activity-plan-user-input-requested",
+                turnId: PLAN_TURN_ID,
+                kind: "user-input.requested",
+                summary: "User input requested",
+                tone: "info",
+                createdAt: isoAt(103),
+                payload: {
+                  requestId: PLAN_REQUEST_ID,
+                  questions: [
+                    {
+                      id: "scope",
+                      header: "Scope",
+                      question: "Which scope should the plan use?",
+                      options: [
+                        {
+                          label: "Minimal patch",
+                          description: "Keep the fix as small as possible",
+                        },
+                      ],
+                    },
+                  ],
+                },
+              },
+            ],
+            updatedAt: isoAt(103),
+            session: {
+              ...thread.session,
+              activeTurnId: null,
+              status: "ready",
+              updatedAt: isoAt(103),
+            },
+          })
+        : thread,
+    ),
+    updatedAt: isoAt(103),
+  };
+}
+
+function createSnapshotWithReadyPlan(): OrchestrationReadModel {
+  const snapshot = createSnapshotWithPendingPlanQuestion();
+
+  return {
+    ...snapshot,
+    snapshotSequence: snapshot.snapshotSequence + 1,
+    threads: snapshot.threads.map((thread) =>
+      thread.id === THREAD_ID
+        ? Object.assign({}, thread, {
+            activities: [
+              ...thread.activities,
+              {
+                id: "activity-plan-user-input-resolved",
+                turnId: PLAN_TURN_ID,
+                kind: "user-input.resolved",
+                summary: "User input resolved",
+                tone: "info",
+                createdAt: isoAt(104),
+                payload: {
+                  requestId: PLAN_REQUEST_ID,
+                  answers: {
+                    scope: "Custom scope details from the answer",
+                  },
+                },
+              },
+            ],
+            proposedPlans: [
+              {
+                id: "plan-ready-browser-test",
+                turnId: PLAN_TURN_ID,
+                planMarkdown:
+                  "# Minimal plan\n\n- Fix the composer ref reset\n- Add a regression test",
+                implementedAt: null,
+                implementationThreadId: null,
+                createdAt: isoAt(105),
+                updatedAt: isoAt(106),
+              },
+            ],
+            updatedAt: isoAt(106),
+            session: {
+              ...thread.session,
+              activeTurnId: null,
+              status: "ready",
+              updatedAt: isoAt(106),
+            },
+          })
+        : thread,
+    ),
+    updatedAt: isoAt(106),
   };
 }
 
@@ -2167,6 +2283,93 @@ describe("ChatView timeline estimator parity (full app)", () => {
       await vi.waitFor(
         () => {
           expect(document.body.textContent).toContain("deep hidden detail only after expand");
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("does not reuse a custom plan-question answer when implementing the finalized plan", async () => {
+    const customAnswer = "Custom scope details from the answer";
+    const readySnapshot = createSnapshotWithReadyPlan();
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotWithPendingPlanQuestion(),
+    });
+
+    try {
+      const composerEditor = page.getByTestId("composer-editor");
+      await expect.element(composerEditor).toBeInTheDocument();
+      await composerEditor.click();
+      await composerEditor.fill(customAnswer);
+
+      const submitAnswersButton = await waitForElement(
+        () =>
+          Array.from(document.querySelectorAll("button")).find(
+            (button) => button.textContent?.trim() === "Submit answers",
+          ) as HTMLButtonElement | null,
+        "Unable to find Submit answers button.",
+      );
+      submitAnswersButton.click();
+
+      await vi.waitFor(
+        () => {
+          const request = wsRequests.find(
+            (entry) =>
+              entry._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+              entry.command &&
+              typeof entry.command === "object" &&
+              (entry.command as { type?: string }).type === "thread.user-input.respond",
+          );
+          expect(request).toMatchObject({
+            _tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
+            command: {
+              type: "thread.user-input.respond",
+              requestId: PLAN_REQUEST_ID,
+              answers: {
+                scope: customAnswer,
+              },
+            },
+          });
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+
+      wsRequests.length = 0;
+      fixture.snapshot = readySnapshot;
+      useStore.getState().syncServerReadModel(readySnapshot);
+
+      const implementButton = await waitForElement(
+        () =>
+          Array.from(document.querySelectorAll("button")).find(
+            (button) => button.textContent?.trim() === "Implement",
+          ) as HTMLButtonElement | null,
+        "Unable to find Implement button.",
+      );
+      implementButton.click();
+
+      await vi.waitFor(
+        () => {
+          const request = wsRequests.find(
+            (entry) =>
+              entry._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+              entry.command &&
+              typeof entry.command === "object" &&
+              (entry.command as { type?: string }).type === "thread.turn.start",
+          );
+          expect(request).toMatchObject({
+            _tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
+            command: {
+              type: "thread.turn.start",
+              threadId: THREAD_ID,
+              interactionMode: "default",
+              message: {
+                text: "PLEASE IMPLEMENT THIS PLAN:\n# Minimal plan\n\n- Fix the composer ref reset\n- Add a regression test",
+              },
+            },
+          });
         },
         { timeout: 8_000, interval: 16 },
       );

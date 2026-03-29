@@ -765,7 +765,18 @@ export default function ChatView({ threadId }: ChatViewProps) {
   useEffect(() => {
     const nextCustomAnswer = activePendingProgress?.customAnswer;
     if (typeof nextCustomAnswer !== "string") {
+      const hadPendingInput = lastSyncedPendingInputRef.current !== null;
       lastSyncedPendingInputRef.current = null;
+      if (!hadPendingInput || promptRef.current === prompt) {
+        return;
+      }
+      promptRef.current = prompt;
+      const nextCursor = collapseExpandedComposerCursor(prompt, prompt.length);
+      setComposerCursor(nextCursor);
+      setComposerTrigger(
+        detectComposerTrigger(prompt, expandCollapsedComposerCursor(prompt, nextCursor)),
+      );
+      setComposerHighlightedItemId(null);
       return;
     }
     const nextRequestId = activePendingUserInput?.requestId ?? null;
@@ -798,6 +809,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
     activePendingProgress?.customAnswer,
     activePendingUserInput?.requestId,
     activePendingProgress?.activeQuestion?.id,
+    prompt,
   ]);
   useEffect(() => {
     attachmentPreviewHandoffByMessageIdRef.current = attachmentPreviewHandoffByMessageId;
